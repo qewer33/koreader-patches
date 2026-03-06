@@ -1,15 +1,26 @@
 -- Hide pagination bar in KOReader File Manager
--- Removes the "« < Page 1 of 2 > »" footer from the file browser
--- Swipe gestures for page navigation still work
+-- Removes the "« < Page 1 of 2 > »" footer from the file browser,
+-- history, favorites, and collections views.
+-- Swipe gestures for page navigation still work.
 
 local Menu = require("ui/widget/menu")
+
+local hide_pagination_names = {
+    filemanager = true,
+    history = true,
+    collections = true,
+}
 
 local orig_menu_init = Menu.init
 
 function Menu:init()
     orig_menu_init(self)
 
-    if self.name ~= "filemanager" then return end
+    -- Match by name, or by full-screen fm-style menus (e.g. collections list has no name)
+    if not hide_pagination_names[self.name]
+       and not (self.covers_fullscreen and self.is_borderless and self.title_bar_fm_style) then
+        return
+    end
 
     -- self[1] is FrameContainer, self[1][1] is the content OverlapGroup
     local content = self[1] and self[1][1]

@@ -80,7 +80,7 @@ The active tab is highlighted with a bold label and underline. The active tab au
 
 ### 2-hide-pagination.lua
 
-Removes the pagination bar (`« < Page 1 of 2 > »`) from the file browser. The mosaic/list grid stretches to fill the reclaimed space. Swipe gestures for page navigation still work.
+Removes the pagination bar (`« < Page 1 of 2 > »`) from the file browser, history, favorites, and collections views. The mosaic/list grid stretches to fill the reclaimed space. Swipe gestures for page navigation still work.
 
 ## Deploy Script
 
