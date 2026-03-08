@@ -665,7 +665,7 @@ end
 -- ============================================================
 
 local quick_settings_tab = {
-    icon = "koreader",
+    icon = "quicksettings",
     remember = false,
     panel = createQuickSettingsPanel,
 }
