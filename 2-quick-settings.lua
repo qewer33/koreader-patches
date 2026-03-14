@@ -35,9 +35,10 @@ local Screen = Device.screen
 -- ============================================================
 
 local config_default = {
-    button_order = { "wifi", "night", "rotate", "usb", "search", "quickrss", "cloud", "zlibrary", "calibre", "notion", "streak", "opds", "restart", "exit", "sleep" },
+    button_order = { "wifi", "light", "night", "rotate", "usb", "search", "quickrss", "cloud", "zlibrary", "calibre", "notion", "streak", "opds", "restart", "exit", "sleep" },
     show_buttons = {
         wifi = true,
+        light = true,
         night = true,
         rotate = true,
         usb = true,
@@ -49,13 +50,14 @@ local config_default = {
         restart = true,
         exit = true,
         sleep = true,
-        -- External plugin buttons (disabled by default; enable if plugin is installed)
+	-- External plugin buttons (disabled by default; enable if plugin is installed)
         notion = false,
         streak = false,
-        opds = false,			 
+        opds = false,
     },
     show_frontlight = true,
     show_warmth = true,
+    show_network_info = true,
     open_on_start = false,
 }
 
@@ -100,30 +102,148 @@ end
 loadConfig()
 
 -- ============================================================
+-- Network Info Helper
+-- ============================================================
+
+local function getNetworkInfo()
+    local ip = "-"
+    local hostname = "Unknown"
+    local ok_andr, andr = pcall(require, "android")
+
+    if ok_andr and andr then
+        local f_host = io.popen("getprop net.hostname 2>/dev/null")
+        local h = f_host and f_host:read("*l")
+        if f_host then f_host:close() end
+
+        if not h or h == "" then
+            local f_host2 = io.popen("getprop hostname 2>/dev/null")
+            h = f_host2 and f_host2:read("*l")
+            if f_host2 then f_host2:close() end
+        end
+
+        if h and h ~= "" then hostname = h end
+    else
+        local f_host = io.popen("hostname 2>/dev/null")
+        if f_host then
+            local h = f_host:read("*l")
+            f_host:close()
+            if h and h ~= "" then hostname = h end
+        end
+    end
+
+    local f_ip_lin = io.popen("ifconfig wlan0 2>/dev/null | grep -i 'inet ' | awk '{print $2}' | sed 's/addr://'")
+    if f_ip_lin then
+        local i = f_ip_lin:read("*l")
+        f_ip_lin:close()
+        if i and i:match("%d+%.%d+%.%d+%.%d+") then
+            ip = i
+        end
+    end
+
+    if ip == "-" then
+        local f_ip_andr = io.popen("getprop dhcp.wlan0.ipaddress 2>/dev/null")
+        if f_ip_andr then
+            local i = f_ip_andr:read("*l")
+            f_ip_andr:close()
+            if i and i:match("%d+%.%d+%.%d+%.%d+") then
+                ip = i
+            end
+        end
+    end
+
+    return ip, hostname
+end
+
+-- ============================================================
 -- Button definitions (data-driven)
 -- ============================================================
 
 local button_defs = {
-    wifi = {
+     wifi = {
         icon = "quick_wifi",
         label = "Wi-Fi",
         label_func = function()
-            if NetworkMgr:isWifiOn() then
-                local net = NetworkMgr:getCurrentNetwork()
-                if net and net.ssid then
-                    return net.ssid
+            local ok_andr, andr = pcall(require, "android")
+            local is_connected = false
+            local is_kitkat = false
+
+            if ok_andr and andr then
+                is_connected = (andr.getNetworkInfo and andr:getNetworkInfo() == "1")
+                is_kitkat = (andr.getVersion and andr:getVersion():find("^4%.4"))
+                
+                if is_connected then
+                    if is_kitkat then
+                        return "Connected"
+                    end
                 end
             end
+
+            local ok_net, netmgr = pcall(require, "ui/network/manager")
+            if ok_net and netmgr then
+                if netmgr:isWifiOn() then
+                    local net = netmgr:getCurrentNetwork()
+                    if net and net.ssid then return net.ssid end
+                    return "Connected"
+                end
+            end
+            
+            if is_connected then return "Connected" end
+            
             return "Wi-Fi"
         end,
-        active_func = function() return NetworkMgr:isWifiOn() end,
-        callback = function(touch_menu)
-            if NetworkMgr:isWifiOn() then
-                NetworkMgr:toggleWifiOff()
-            else
-                NetworkMgr:toggleWifiOn()
+
+        active_func = function()
+            local ok_andr, andr = pcall(require, "android")
+            if ok_andr and andr and andr.getNetworkInfo then
+                return andr:getNetworkInfo() == "1"
             end
-            UIManager:scheduleIn(1, function()
+            local ok_net, netmgr = pcall(require, "ui/network/manager")
+            if ok_net and netmgr then
+                return netmgr:isWifiOn()
+            end
+            return false
+        end,
+
+        callback = function(touch_menu)
+            local ok_andr, andr = pcall(require, "android")
+            if ok_andr and andr and andr.openWifiSettings then
+                andr:openWifiSettings()
+            else
+                local netmgr = require("ui/network/manager")
+                if netmgr:isWifiOn() then 
+                    netmgr:toggleWifiOff() 
+                else 
+                    netmgr:toggleWifiOn() 
+                end
+            end
+            
+            require("ui/uimanager"):scheduleIn(1.5, function()
+                if touch_menu.item_table and touch_menu.item_table.panel then
+                    touch_menu:updateItems(1)
+                end
+            end)
+        end,
+    },
+    light = {
+        icon = "quick_light",
+        label = "Light",
+        active_func = function()
+            local powerd = Device:getPowerDevice()
+            return powerd:frontlightIntensity() > 0
+        end,
+        callback = function(touch_menu)
+            local powerd = Device:getPowerDevice()
+            local current_intensity = powerd:frontlightIntensity()
+
+            if current_intensity > 0 then
+                G_reader_settings:saveSetting("qs_saved_fl_intensity", current_intensity)
+                powerd:setIntensity(0)
+            else
+                local saved_intensity = G_reader_settings:readSetting("qs_saved_fl_intensity") or 10
+                powerd:setIntensity(saved_intensity)
+            end
+
+            UIManager:scheduleIn(0.1, function()
                 if touch_menu.item_table and touch_menu.item_table.panel then
                     touch_menu:updateItems(1)
                 end
@@ -238,18 +358,27 @@ local button_defs = {
         icon = "quick_calibre",
         label = "Calibre",
         active_func = function()
-            local CW = package.loaded["wireless"]
-            return CW ~= nil and CW.calibre_socket ~= nil
+            local ok, CalibreWireless = pcall(require, "calibre/wireless")
+            return ok and CalibreWireless and CalibreWireless.calibre_socket ~= nil
         end,
         callback = function(touch_menu)
-            local CW = package.loaded["wireless"]
-            if CW and CW.calibre_socket ~= nil then
-                UIManager:broadcastEvent(Event:new("CloseWirelessConnection"))
+            local ok, CalibreWireless = pcall(require, "calibre/wireless")
+            if not ok or not CalibreWireless then
+                local InfoMessage = require("ui/widget/infomessage")
+                UIManager:show(InfoMessage:new{
+                    text = _("Calibre plugin is not available."),
+                })
+                return
+            end
+            if not CalibreWireless.calibre_socket then
+                CalibreWireless:connect()
             else
-                UIManager:broadcastEvent(Event:new("StartWirelessConnection"))
+                CalibreWireless:disconnect()
             end
             UIManager:scheduleIn(1, function()
-                touch_menu:updateItems(1)
+                if touch_menu.item_table and touch_menu.item_table.panel then
+                    touch_menu:updateItems(1)
+                end
             end)
         end,
     },
@@ -281,9 +410,11 @@ local button_defs = {
     },		  
 }
 
+
 -- Display names for the settings menu
 local button_display_names = {
     wifi = _("Wi-Fi"),
+    light = _("Frontlight Toggle"),
     night = _("Night mode"),
     rotate = _("Rotate"),
     usb = _("USB"),
@@ -294,7 +425,7 @@ local button_display_names = {
     quickrss = _("QuickRSS"),
     cloud = _("Cloud storage"),
     zlibrary = _("Z-Library"),
-    calibre = _("Calibre"),
+    calibre = _("Calibre"),	
 	notion   = _("Notion"),
     streak   = _("Streak"),
     opds     = _("OPDS"),
@@ -456,6 +587,8 @@ local function createQuickSettingsPanel(touch_menu)
             fl_progress:setPercentage(fl.cur / fl.max)
             fl_label:setText(_("Frontlight") .. ": " .. tostring(fl.cur))
             UIManager:setDirty(touch_menu.show_parent, "ui")
+            
+            touch_menu:updateItems(1)
         end
 
         local function setBrightness(intensity)
@@ -626,6 +759,23 @@ local function createQuickSettingsPanel(touch_menu)
         table.insert(panel, warmth_group)
     end
     table.insert(panel, VerticalSpan:new{ width = Screen:scaleBySize(8) })
+
+    -- ----- Network Info Section -----
+    if config.show_network_info then
+        local ip, hostname = getNetworkInfo()
+        local net_info_text = string.format("Host: %s   |   IP: %s", hostname, ip)
+        local net_info_label = TextWidget:new{
+            text = net_info_text,
+            face = label_font,
+            max_width = inner_width,
+        }
+        table.insert(panel, CenterContainer:new{
+            dimen = Geom:new{ w = panel_width, h = net_info_label:getSize().h },
+            net_info_label,
+        })
+        table.insert(panel, VerticalSpan:new{ width = Screen:scaleBySize(12) })
+    end
+    -- --------------------------------
 
     -- Store refs on the touch_menu for gesture handlers
     touch_menu._qs_refs = refs
@@ -843,6 +993,14 @@ local function buildSettingsMenu()
                 checked_func = function() return config.show_warmth end,
                 callback = function()
                     config.show_warmth = not config.show_warmth
+                    saveConfig()
+                end,
+            },
+			{
+                text = _("Show network info"),
+                checked_func = function() return config.show_network_info end,
+                callback = function()
+                    config.show_network_info = not config.show_network_info
                     saveConfig()
                 end,
                 separator = true,
