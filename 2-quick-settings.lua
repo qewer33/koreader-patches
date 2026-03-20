@@ -135,10 +135,7 @@ local button_defs = {
         label = "Night",
         active_func = function() return G_reader_settings:isTrue("night_mode") end,
         callback = function(touch_menu)
-            local night_mode = G_reader_settings:isTrue("night_mode")
-            Screen:toggleNightMode()
-            UIManager:ToggleNightMode(not night_mode)
-            G_reader_settings:saveSetting("night_mode", not night_mode)
+            UIManager:broadcastEvent(Event:new("ToggleNightMode"))
             touch_menu:updateItems(1)
             UIManager:setDirty("all", "full")
         end,
