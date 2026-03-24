@@ -6,6 +6,7 @@
 -- OPDS Catalog is included with KOReader and allows browsing OPDS book catalogs.
 -- NotionSync plugin by Cezary Pukownik: https://github.com/CezaryPukownik/notionsync.koplugin
 -- Reading Streak plugin by advokatb: https://github.com/advokatb/readingstreak.koplugin
+-- Add per-profile quick buttons via MultiUser.koplugin: https://github.com/artemartemenko/KOReader_MultiUser.koplugin
 
 local Blitbuffer = require("ffi/blitbuffer")
 local CenterContainer = require("ui/widget/container/centercontainer")
@@ -17,6 +18,7 @@ local Geom = require("ui/geometry")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local IconWidget = require("ui/widget/iconwidget")
+local ImageWidget = require("ui/widget/imagewidget")
 local Math = require("optmath")
 local NetworkMgr = require("ui/network/manager")
 local Button = require("ui/widget/button")
@@ -24,18 +26,21 @@ local ConfirmBox = require("ui/widget/confirmbox")
 local ButtonProgressWidget = require("ui/widget/buttonprogresswidget")
 local ProgressWidget = require("ui/widget/progresswidget")
 local TextWidget = require("ui/widget/textwidget")
+local Widget = require("ui/widget/widget")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local _ = require("gettext")
 local Screen = Device.screen
+local lfs = require("libs/libkoreader-lfs")
+local DocumentRegistry = require("document/documentregistry")
 
 -- ============================================================
 -- Configuration
 -- ============================================================
 
 local config_default = {
-    button_order = { "wifi", "night", "rotate", "usb", "search", "quickrss", "cloud", "zlibrary", "calibre", "notion", "streak", "opds", "restart", "exit", "sleep" },
+    button_order = { "wifi", "night", "rotate", "usb", "search", "quickrss", "cloud", "zlibrary", "calibre", "notion", "streak", "opds", "multiuser", "restart", "exit", "sleep" },
     show_buttons = {
         wifi = true,
         night = true,
@@ -52,7 +57,9 @@ local config_default = {
         -- External plugin buttons (disabled by default; enable if plugin is installed)
         notion = false,
         streak = false,
-        opds = false,			 
+        opds = false,
+        -- MultiUser.koplugin: one quick button per profile (dynamic list)
+        multiuser = false,
     },
     show_frontlight = true,
     show_warmth = true,
@@ -278,7 +285,12 @@ local button_defs = {
         callback = function()
             UIManager:broadcastEvent(Event:new("ShowOPDSCatalog"))
         end,
-    },		  
+    },
+    -- Populated dynamically in createQuickSettingsPanel (see "multiuser" in button_order).
+    multiuser = {
+        icon = "notice-info",
+        label = "MultiUser",
+    },
 }
 
 -- Display names for the settings menu
@@ -298,7 +310,73 @@ local button_display_names = {
 	notion   = _("Notion"),
     streak   = _("Streak"),
     opds     = _("OPDS"),
+    multiuser = _("User profiles (MultiUser)"),
 }
+
+-- Circular avatar mask: alpha=0 outside the circle so the image is not square on the round button.
+local CircularMaskedAvatarWidget = Widget:extend{
+    width = nil,
+    height = nil,
+    file = nil,
+}
+
+function CircularMaskedAvatarWidget:init()
+    self.dimen = Geom:new{ x = 0, y = 0, w = self.width, h = self.height }
+    self._image = ImageWidget:new{
+        file = self.file,
+        width = self.width,
+        height = self.height,
+        scale_factor = 0,
+        alpha = true,
+        original_in_nightmode = true,
+    }
+end
+
+function CircularMaskedAvatarWidget:getSize()
+    return self.dimen
+end
+
+function CircularMaskedAvatarWidget:paintTo(bb, x, y)
+    if not self._image then
+        return
+    end
+    self.dimen.x = x
+    self.dimen.y = y
+    local w, h = self.width, self.height
+    local tmp = Blitbuffer.new(w, h, Blitbuffer.TYPE_BBRGB32)
+    tmp:fill(Blitbuffer.COLOR_WHITE)
+    self._image:paintTo(tmp, 0, 0)
+    local cx = (w - 1) * 0.5
+    local cy = (h - 1) * 0.5
+    local r = math.floor(math.min(w, h) * 0.5) - 1
+    if r < 1 then
+        r = 1
+    end
+    local rsq = r * r
+    local transparent = Blitbuffer.ColorRGB32(0, 0, 0, 0)
+    for iy = 0, h - 1 do
+        local dy = iy - cy
+        for ix = 0, w - 1 do
+            local dx = ix - cx
+            if dx * dx + dy * dy > rsq then
+                tmp:setPixel(ix, iy, transparent)
+            end
+        end
+    end
+    if Screen.sw_dithering then
+        bb:ditheralphablitFrom(tmp, x, y, 0, 0, w, h)
+    else
+        bb:alphablitFrom(tmp, x, y, 0, 0, w, h)
+    end
+    tmp:free()
+end
+
+function CircularMaskedAvatarWidget:onCloseWidget()
+    if self._image then
+        self._image:onCloseWidget()
+        self._image = nil
+    end
+end
 
 -- ============================================================
 -- Panel builder — returns panel widget + refs for tap handling
@@ -313,12 +391,69 @@ local function createQuickSettingsPanel(touch_menu)
     -- Refs table: stored on touch_menu for gesture handling
     local refs = { buttons = {} }
 
+    -- MultiUser avatar in the round slot when path is valid; otherwise nil (stock icon is used).
+    local function multiUserQuickCenterWidget(profile_id, inner_side)
+        local o, M = pcall(require, "koreader_multiuser_api")
+        if not (o and M and M.apiIsAvailable and M.apiIsAvailable() and M.apiGetProfileAvatarPath) then
+            return nil
+        end
+        local path = M.apiGetProfileAvatarPath(profile_id)
+        if not path or path == "" or lfs.attributes(path, "mode") ~= "file" then
+            return nil
+        end
+        if not DocumentRegistry:isImageFile(path) then
+            return nil
+        end
+        return CircularMaskedAvatarWidget:new{
+            file = path,
+            width = inner_side,
+            height = inner_side,
+        }
+    end
+
     -- ----- Top row: action buttons -----
 
     -- Collect visible buttons in order
     local visible_buttons = {}
     for _, id in ipairs(config.button_order) do
-        if config.show_buttons[id] and button_defs[id] then
+        if not config.show_buttons[id] then
+            -- skip
+        elseif id == "multiuser" then
+            -- One slot in button_order expands to other profiles only (omit current user).
+            local ok_mu, MU = pcall(require, "koreader_multiuser_api")
+            if ok_mu and MU.apiIsAvailable() then
+                local names = MU.apiGetProfileNames()
+                if #names > 1 then
+                    for _, pid in ipairs(names) do
+                        if MU.apiIsActiveProfile(pid) then
+                            -- current user is not shown in the panel
+                        else
+                            local profile_id = pid
+                            table.insert(visible_buttons, {
+                                id = "multiuser:" .. profile_id,
+                                def = {
+                                    avatar_profile_id = profile_id,
+                                    icon = "notice-info",
+                                    label_func = function()
+                                        local o, M = pcall(require, "koreader_multiuser_api")
+                                        if o and M and M.apiIsAvailable() then
+                                            return M.apiGetDisplayName(profile_id)
+                                        end
+                                        return profile_id
+                                    end,
+                                    callback = function()
+                                        local o, M = pcall(require, "koreader_multiuser_api")
+                                        if o and M then
+                                            M.apiSwitchToProfile(profile_id)
+                                        end
+                                    end,
+                                },
+                            })
+                        end
+                    end
+                end
+            end
+        elseif button_defs[id] then
             table.insert(visible_buttons, { id = id, def = button_defs[id] })
         end
     end
@@ -331,8 +466,8 @@ local function createQuickSettingsPanel(touch_menu)
     -- Active styling
     local normal_border = Screen:scaleBySize(2)
 
-    local function makeActionButton(icon_name, label_text, active)
-        local icon = IconWidget:new{
+    local function makeActionButton(icon_name, label_text, active, override_center)
+        local center_inner = override_center or IconWidget:new{
             icon = icon_name,
             width = icon_size,
             height = icon_size,
@@ -350,7 +485,7 @@ local function createQuickSettingsPanel(touch_menu)
                     w = action_btn_size - normal_border * 2,
                     h = action_btn_size - normal_border * 2,
                 },
-                icon,
+                center_inner,
             },
         }
         local label = TextWidget:new{
@@ -380,7 +515,12 @@ local function createQuickSettingsPanel(touch_menu)
                 label_text = def.label_func()
             end
             local active = def.active_func and def.active_func() or false
-            local btn_widget, btn_circle = makeActionButton(def.icon, label_text, active)
+            local inner_side = action_btn_size - normal_border * 2
+            local center_override
+            if def.avatar_profile_id then
+                center_override = multiUserQuickCenterWidget(def.avatar_profile_id, inner_side)
+            end
+            local btn_widget, btn_circle = makeActionButton(def.icon, label_text, active, center_override)
 
             table.insert(refs.buttons, {
                 widget = btn_circle,
@@ -802,9 +942,9 @@ local function buildSettingsMenu()
             local SortWidget = require("ui/widget/sortwidget")
             local sort_items = {}
             for _, id in ipairs(config.button_order) do
-                if button_defs[id] then
+                if button_defs[id] or id == "multiuser" then
                     table.insert(sort_items, {
-                        text = button_display_names[id],
+                        text = button_display_names[id] or id,
                         orig_item = id,
                         dim = not config.show_buttons[id],
                     })
