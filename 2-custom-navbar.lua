@@ -1,20 +1,25 @@
 -- Bottom Navigation Bar patch for KOReader File Manager
 -- Adds a tab bar at the bottom with Books, Manga, News, Continue
 -- Sits below pagination controls
+-- MultiUser.koplugin profile shortcuts
 
 local Blitbuffer = require("ffi/blitbuffer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Device = require("device")
+local DocumentRegistry = require("document/documentregistry")
 local FileManager = require("apps/filemanager/filemanager")
 local Font = require("ui/font")
+local FrameContainer = require("ui/widget/container/framecontainer")
 local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local IconWidget = require("ui/widget/iconwidget")
+local ImageWidget = require("ui/widget/imagewidget")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local LineWidget = require("ui/widget/linewidget")
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
+local Widget = require("ui/widget/widget")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
@@ -32,6 +37,8 @@ local navbar_v_padding = Screen:scaleBySize(4)
 local corner_dead_zone = math.floor(Screen:getWidth() / 12)
 local navbar_top_gap = Screen:scaleBySize(10)
 local underline_thickness = Screen:scaleBySize(2)
+-- Thinner ring than Quick Settings (2): small round profile icons in the navbar
+local multiuser_nav_border = Screen:scaleBySize(1)
 
 -- === Persistent config ===
 
@@ -47,8 +54,9 @@ local config_default = {
         exit = false,
         page_left = false,
         page_right = false,
+        multiuser = false,
     },
-    tab_order = { "page_left", "books", "manga", "news", "continue", "history", "favorites", "collections", "exit", "page_right" },
+    tab_order = { "page_left", "books", "manga", "news", "continue", "history", "favorites", "collections", "multiuser", "exit", "page_right" },
     show_labels = true,
     show_top_border = true,
     books_label = "Books",
@@ -155,6 +163,11 @@ local tabs = {
         id = "page_right",
         label = _("Next"),
         icon = "tab_right",
+    },
+    {
+        id = "multiuser",
+        label = _("Profiles"),
+        icon = "notice-info",
     },
 }
 
@@ -397,6 +410,130 @@ function ColorIconWidget:paintTo(bb, x, y)
     self._bb:invert()
 end
 
+-- Circular avatar mask (same idea as THIRDPARTY/2-quick-settings.lua)
+local CircularMaskedAvatarWidget = Widget:extend{
+    width = nil,
+    height = nil,
+    file = nil,
+}
+
+function CircularMaskedAvatarWidget:init()
+    self.dimen = Geom:new{ x = 0, y = 0, w = self.width, h = self.height }
+    self._image = ImageWidget:new{
+        file = self.file,
+        width = self.width,
+        height = self.height,
+        scale_factor = 0,
+        alpha = true,
+        original_in_nightmode = true,
+    }
+end
+
+function CircularMaskedAvatarWidget:getSize()
+    return self.dimen
+end
+
+function CircularMaskedAvatarWidget:paintTo(bb, x, y)
+    if not self._image then
+        return
+    end
+    self.dimen.x = x
+    self.dimen.y = y
+    local w, h = self.width, self.height
+    local tmp = Blitbuffer.new(w, h, Blitbuffer.TYPE_BBRGB32)
+    tmp:fill(Blitbuffer.COLOR_WHITE)
+    self._image:paintTo(tmp, 0, 0)
+    local cx = (w - 1) * 0.5
+    local cy = (h - 1) * 0.5
+    local r = math.floor(math.min(w, h) * 0.5) - 1
+    if r < 1 then
+        r = 1
+    end
+    local rsq = r * r
+    local transparent = Blitbuffer.ColorRGB32(0, 0, 0, 0)
+    for iy = 0, h - 1 do
+        for ix = 0, w - 1 do
+            local dx = ix - cx
+            local dy = iy - cy
+            if dx * dx + dy * dy > rsq then
+                tmp:setPixel(ix, iy, transparent)
+            end
+        end
+    end
+    if Screen.sw_dithering then
+        bb:ditheralphablitFrom(tmp, x, y, 0, 0, w, h)
+    else
+        bb:alphablitFrom(tmp, x, y, 0, 0, w, h)
+    end
+    tmp:free()
+end
+
+function CircularMaskedAvatarWidget:onCloseWidget()
+    if self._image then
+        self._image:onCloseWidget()
+        self._image = nil
+    end
+end
+
+local function switchMultiUserNavbarProfile(profile_id)
+    local o, M = pcall(require, "koreader_multiuser_api")
+    if o and M then
+        M.apiSwitchToProfile(profile_id)
+    end
+end
+
+-- Profile chip border matches normal UI icons (font_fg from 2-color-theme); black if theme patch is absent
+local function multiuserNavBorderColor()
+    local ok, M = pcall(require, "koreader_color_theme_ui")
+    if ok and M and type(M.getFontForegroundColor) == "function" then
+        local c = M.getFontForegroundColor()
+        if c then return c end
+    end
+    return Blitbuffer.COLOR_BLACK
+end
+
+-- Round profile chip: thin border, optional circular avatar inside
+local function buildMultiUserNavIcon(profile_id, border_color)
+    local outer = navbar_icon_size
+    local border = multiuser_nav_border
+    local inner = math.max(1, outer - 2 * border)
+    local center_widget
+    local o, M = pcall(require, "koreader_multiuser_api")
+    if o and M and M.apiIsAvailable() and M.apiGetProfileAvatarPath then
+        local path = M.apiGetProfileAvatarPath(profile_id)
+        if path and path ~= "" and lfs.attributes(path, "mode") == "file"
+            and DocumentRegistry:isImageFile(path) then
+            center_widget = CircularMaskedAvatarWidget:new{
+                file = path,
+                width = inner,
+                height = inner,
+            }
+        end
+    end
+    if not center_widget then
+        local fallback = math.max(1, math.floor(inner * 0.55))
+        center_widget = IconWidget:new{
+            icon = "notice-info",
+            width = fallback,
+            height = fallback,
+            alpha = true,
+        }
+    end
+    return FrameContainer:new{
+        width = outer,
+        height = outer,
+        radius = math.floor(outer / 2),
+        bordersize = border,
+        color = border_color,
+        background = Blitbuffer.COLOR_WHITE,
+        padding = 0,
+        CenterContainer:new{
+            dimen = Geom:new{ w = inner, h = inner },
+            center_widget,
+        },
+    }
+end
+
 -- === Build a single tab (visual only) ===
 
 local function createTabWidget(tab, tab_w, is_active)
@@ -413,7 +550,9 @@ local function createTabWidget(tab, tab_w, is_active)
     local use_bold = styled and config.active_tab_bold
 
     local icon
-    if active_color then
+    if tab.is_multiuser and tab.profile_id then
+        icon = buildMultiUserNavIcon(tab.profile_id, multiuserNavBorderColor())
+    elseif active_color then
         icon = ColorIconWidget:new{
             icon = tab.icon,
             width = navbar_icon_size,
@@ -520,7 +659,22 @@ local navbar_h_padding = Screen:scaleBySize(10)
 local function getVisibleTabs()
     local visible = {}
     for _, id in ipairs(config.tab_order) do
-        if (id == "books" or config.show_tabs[id]) and tabs_by_id[id] then
+        if id == "multiuser" and config.show_tabs.multiuser then
+            local ok, MU = pcall(require, "koreader_multiuser_api")
+            if ok and MU.apiIsAvailable() then
+                for _, pid in ipairs(MU.apiGetProfileNames()) do
+                    if not MU.apiIsActiveProfile(pid) then
+                        table.insert(visible, {
+                            id = "multiuser:" .. pid,
+                            profile_id = pid,
+                            label = MU.apiGetDisplayName(pid),
+                            icon = "notice-info",
+                            is_multiuser = true,
+                        })
+                    end
+                end
+            end
+        elseif (id == "books" or config.show_tabs[id]) and tabs_by_id[id] then
             table.insert(visible, tabs_by_id[id])
         end
     end
@@ -608,14 +762,19 @@ local function createNavBar()
         local idx = math.floor(tap_x / tab_w) + 1
         idx = math.max(1, math.min(#visible_tabs, idx))
         local tapped_id = visible_tabs[idx].id
-        local cb = tab_callbacks[tapped_id]
-        if cb then cb() end
-        -- Only update active tab for tabs that stay in the file browser
-        local stays_in_browser = tapped_id == "books"
-            or (tapped_id == "manga" and config.manga_action == "folder" and config.manga_folder ~= "")
-            or (tapped_id == "news" and config.news_action == "folder" and config.news_folder ~= "")
-        if stays_in_browser and tapped_id ~= active_tab then
-            setActiveTab(tapped_id)
+        local mu_pid = tapped_id:match("^multiuser:(.+)$")
+        if mu_pid then
+            switchMultiUserNavbarProfile(mu_pid)
+        else
+            local cb = tab_callbacks[tapped_id]
+            if cb then cb() end
+            -- Only update active tab for tabs that stay in the file browser
+            local stays_in_browser = tapped_id == "books"
+                or (tapped_id == "manga" and config.manga_action == "folder" and config.manga_folder ~= "")
+                or (tapped_id == "news" and config.news_action == "folder" and config.news_folder ~= "")
+            if stays_in_browser and tapped_id ~= active_tab then
+                setActiveTab(tapped_id)
+            end
         end
         return true
     end
@@ -800,6 +959,12 @@ injectStandaloneNavbar = function(menu, view_tab_id)
         idx = math.max(1, math.min(#vis_tabs, idx))
         local tapped_id = vis_tabs[idx].id
 
+        local mu_pid = tapped_id:match("^multiuser:(.+)$")
+        if mu_pid then
+            switchMultiUserNavbarProfile(mu_pid)
+            return true
+        end
+
         -- Already in this view, do nothing
         if tapped_id == view_tab_id then
             return true
@@ -958,6 +1123,11 @@ hookQuickRSSInit = function()
             local idx = math.floor(tap_x / tab_w_local) + 1
             idx = math.max(1, math.min(#vis_tabs, idx))
             local tapped_id = vis_tabs[idx].id
+            local mu_pid = tapped_id:match("^multiuser:(.+)$")
+            if mu_pid then
+                switchMultiUserNavbarProfile(mu_pid)
+                return true
+            end
             if tapped_id == "news" then return true end
             self:onClose()
             setActiveTab(tapped_id)
@@ -1352,6 +1522,15 @@ function FileManagerMenu:setUpdateItemTable()
                         checked_func = function() return config.show_tabs.page_right end,
                         callback = function()
                             config.show_tabs.page_right = not config.show_tabs.page_right
+                            G_reader_settings:saveSetting("bottom_navbar", config)
+                        end,
+                    },
+                    {
+                        text = _("MultiUser profiles"),
+                        help_text = _("One tab slot per other profile (MultiUser.koplugin). Order via Arrange tabs."),
+                        checked_func = function() return config.show_tabs.multiuser end,
+                        callback = function()
+                            config.show_tabs.multiuser = not config.show_tabs.multiuser
                             G_reader_settings:saveSetting("bottom_navbar", config)
                         end,
                     },
